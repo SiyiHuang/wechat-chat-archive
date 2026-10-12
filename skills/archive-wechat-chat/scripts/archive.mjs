@@ -9,6 +9,7 @@ import { promisify } from 'node:util';
 
 export const MEDIA_STATUSES = ['original_verified', 'saved_unverified', 'preview', 'unavailable'];
 export const QUOTE_STATUSES = ['exact', 'inferred', 'unresolved', 'image-only'];
+export const SOURCE_MODES = ['main_chat', 'merged_forward', 'history_search'];
 const own = (object, key) => Object.prototype.hasOwnProperty.call(object, key);
 const assert = (condition, message) => { if (!condition) throw new Error(message); };
 const nonempty = value => typeof value === 'string' && value.trim().length > 0;
@@ -32,6 +33,42 @@ export function validTimestamp(value) {
     && (!value.includes(' ') || validDate(value.split(' ')[0]));
 }
 
+export function normalizeWechatTimestamp(value) {
+  assert(nonempty(value), 'Timestamp is not displayed; retain the unresolved capture evidence');
+  const raw = value.trim();
+  if (validTimestamp(raw)) return raw;
+  const match = raw.match(/^(\d{4})-(\d{1,2})-(\d{1,2})\s+(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+  assert(match, `Unsupported timestamp label without a confirmed full date: ${raw}`);
+  const normalized = `${match[1]}-${match[2].padStart(2, '0')}-${match[3].padStart(2, '0')} ${match[4].padStart(2, '0')}:${match[5]}${match[6] ? `:${match[6]}` : ''}`;
+  assert(validTimestamp(normalized), `Invalid timestamp: ${raw}`);
+  return normalized;
+}
+
+function validMessageTime(message) {
+  if (validTimestamp(message.timestamp)) return true;
+  const context = message.timeContext;
+  return message.timestamp === null && context && ['separator', 'not_displayed'].includes(context.kind)
+    && list(context.evidence) && context.evidence.length > 0
+    && (context.kind !== 'separator' || nonempty(context.label))
+    && (!context.date || (validDate(context.date) && list(context.dateEvidence) && context.dateEvidence.length > 0))
+    && (!context.contextId || nonempty(context.contextId));
+}
+
+export function timestampDisplay(message) {
+  if (message.timestamp !== null) return message.timestamp;
+  if (message.timeContext?.kind === 'separator') return `时间未逐条显示（分隔标注：${message.timeContext.label}）`;
+  return '时间未显示';
+}
+
+export function timePrecision(messages) {
+  return messages.reduce((counts, message) => {
+    if (message.timestamp !== null) counts.exact++;
+    else if (message.timeContext?.kind === 'separator') counts.separator++;
+    else counts.notDisplayed++;
+    return counts;
+  }, { exact: 0, separator: 0, notDisplayed: 0 });
+}
+
 export function roundFilename(date, round = '01') {
   assert(validDate(date), 'Invalid round date');
   assert(typeof round === 'string' && /^\d{2,}$/.test(round) && Number(round) >= 1, 'Round must be a positive padded string, e.g. 01');
@@ -45,24 +82,51 @@ export function parseRoundFilename(filename) {
 }
 
 export function messageIdentity(message) {
-  return JSON.stringify([normalize(message.timestamp), normalize(message.speaker), normalize(message.body),
+  const time = message.timestamp === null ? [null, message.timeContext?.kind, normalize(message.timeContext?.label), message.timeContext?.date ?? null, message.timeContext?.contextId ?? null] : normalize(message.timestamp);
+  return JSON.stringify([time, normalize(message.speaker), normalize(message.body),
     message.quote ? [normalize(message.quote.speaker), normalize(message.quote.text)] : null,
     (message.media ?? []).map(m => [m.kind ?? 'image', m.captureId ?? m.sha256 ?? m.path ?? null])]);
 }
 
-export function mergePages(pages) {
+export function mergePages(pages, { captureOrder = 'older_to_newer' } = {}) {
   assert(Array.isArray(pages) && pages.length > 0, 'Capture needs at least one page');
+  assert(['older_to_newer', 'newer_to_older'].includes(captureOrder), 'Invalid captureOrder');
   const messages = [], overlaps = [];
-  for (const [index, page] of pages.entries()) {
+  const orderedPages = captureOrder === 'newer_to_older' ? [...pages].reverse() : pages;
+  for (const [index, page] of orderedPages.entries()) {
     assert(Array.isArray(page.messages), `Page ${index + 1} needs messages`);
+    if (page.orderEvidence !== undefined) assert(list(page.orderEvidence) && page.orderEvidence.length, 'Page orderEvidence must describe full snapshot top-to-bottom order');
     const incoming = page.messages;
     let overlap = 0;
+    const candidates = [];
     for (let size = Math.min(messages.length, incoming.length); size > 0; size--) {
-      if (messages.slice(-size).every((item, i) => messageIdentity(item) === messageIdentity(incoming[i]))) { overlap = size; break; }
+      if (messages.slice(-size).every((item, i) => messageIdentity(item) === messageIdentity(incoming[i]))) candidates.push(size);
+    }
+    overlap = candidates[0] ?? 0;
+    if (index && page.overlap) {
+      assert(Number.isInteger(page.overlap.count) && page.overlap.count >= 0 && list(page.overlap.evidence) && page.overlap.evidence.length, 'Reviewed overlap requires a nonnegative count and evidence');
+      assert(page.overlap.count === 0 || candidates.includes(page.overlap.count), 'Reviewed overlap disagrees with ordered message identity');
+      overlap = page.overlap.count;
+    } else if (overlap) {
+      const sequence = incoming.slice(0, overlap).map(messageIdentity);
+      const occurrences = records => records.reduce((count, _, start) => count + (start + sequence.length <= records.length && sequence.every((identity, i) => identity === messageIdentity(records[start + i])) ? 1 : 0), 0);
+      assert(candidates.length === 1 && occurrences(messages) === 1 && occurrences(incoming) === 1,
+        `Page ${index + 1} has ambiguous repeated overlap; supply reviewed overlap.count and screenshot/AX occurrence evidence`);
     }
     if (index && incoming.length && messages.length && !overlap) {
       assert(page.contiguousEvidence && list(page.contiguousEvidence) && page.contiguousEvidence.length,
         `Page ${index + 1} has no ordered overlap; provide contiguousEvidence or recapture`);
+    }
+    for (let i = 0; i < overlap; i++) {
+      const retained = messages[messages.length - overlap + i], observed = incoming[i];
+      if (retained.evidence || observed.evidence) {
+        retained.evidence ??= {};
+        for (const field of new Set([...Object.keys(retained.evidence), ...Object.keys(observed.evidence ?? {})])) {
+          const previous = retained.evidence[field] ?? [], additional = observed.evidence?.[field] ?? [];
+          assert(Array.isArray(previous) && Array.isArray(additional), 'Message evidence fields must be arrays');
+          retained.evidence[field] = [...new Set([...previous, ...additional])];
+        }
+      }
     }
     overlaps.push(overlap);
     messages.push(...incoming.slice(overlap).map(item => structuredClone(item)));
@@ -70,14 +134,46 @@ export function mergePages(pages) {
   return { messages, overlaps };
 }
 
+function validateSourceContext(round) {
+  const source = round.source;
+  assert(source && SOURCE_MODES.includes(source.mode), 'source.mode must identify main_chat, merged_forward, or history_search');
+  assert(nonempty(source.subjectId) && nonempty(source.scopeId) && nonempty(source.title), 'Source requires subjectId, scopeId, and observed title');
+  assert(list(source.identityEvidence) && source.identityEvidence.length, 'Source requires observed conversation and scope identity evidence');
+  assert(['older_to_newer', 'newer_to_older'].includes(round.captureOrder), 'Source capture needs explicit captureOrder');
+  const range = round.requestedRange;
+  assert(range && nonempty(range.label) && list(range.evidence) && range.evidence.length, 'Capture needs a requestedRange label and evidence');
+  if (range.start) assert(nonempty(range.start), 'Invalid requested range start');
+  if (range.end) assert(nonempty(range.end), 'Invalid requested range end');
+  if (round.completeness?.status === 'incomplete') assert(list(round.completeness.limitations) && round.completeness.limitations.length, 'Incomplete source capture requires an explicit coverage or media limitation');
+  if (round.completeness?.status === 'complete') {
+    for (const [edge, direction] of [['start', 'toward_older'], ['end', 'toward_newer']]) {
+      const boundary = round.boundaries?.[edge];
+      assert(boundary && ['visible_marker', 'confirmed_scroll_boundary', 'requested_range'].includes(boundary.kind)
+        && boundary.direction === direction && list(boundary.evidence) && boundary.evidence.length, `Complete capture needs ${edge} boundary evidence in ${direction} direction`);
+      if (boundary.kind === 'confirmed_scroll_boundary') assert(list(boundary.positionEvidence) && boundary.positionEvidence.length
+        && list(boundary.settledEvidence) && boundary.settledEvidence.length, 'An unchanged viewport alone is not a boundary: require positionEvidence and settledEvidence');
+      if (source.mode === 'history_search') assert(boundary.kind === 'requested_range', 'Search results prove only the requested result scope, not all chat history');
+    }
+  }
+  for (const message of round.messages ?? []) {
+    for (const field of ['speaker', 'body', 'timestamp']) assert(list(message.evidence?.[field]) && message.evidence[field].length,
+      `${message.id ?? 'Captured message'}: requires per-message ${field} evidence`);
+  }
+}
+
+function sameSource(first, second) { return first.subjectId === second.subjectId && first.scopeId === second.scopeId; }
+
 export function trimIncremental(messages, archived, anchorId) {
   if (!archived.length) { assert(!anchorId, 'Anchor supplied for empty archive'); return { messages, overlap: 0, anchorId: null }; }
   const anchor = archived.at(-1);
   assert(!anchorId || anchorId === anchor.id, 'Incremental anchor must be the latest archived message');
   const matches = messages.flatMap((message, index) => messageIdentity(message) === messageIdentity(anchor) ? [index] : []);
   assert(matches.length, `Latest archived anchor ${anchor.id} not found in capture`);
-  assert(matches.length === 1, `Ambiguous incremental anchor ${anchor.id}: ${matches.length} matches; capture a distinctive ending context`);
-  const end = matches[0] + 1;
+  const candidates = matches.map(index => index + 1).filter(end => end <= archived.length
+    && messages.slice(0, end).every((message, i) => messageIdentity(message) === messageIdentity(archived[archived.length - end + i])));
+  assert(candidates.length, 'Capture leading sequence is not an exact suffix of the archive');
+  assert(candidates.length === 1 && (matches.length === 1 || candidates[0] > 1), `Ambiguous incremental anchor ${anchor.id}: ${matches.length} matches; capture a distinctive ending context`);
+  const end = candidates[0];
   assert(end <= archived.length, 'Capture prefix extends beyond available archived overlap');
   assert(messages.slice(0, end).every((message, i) => messageIdentity(message) === messageIdentity(archived[archived.length - end + i])),
     'Capture leading sequence is not an exact suffix of the archive');
@@ -194,6 +290,7 @@ export function validateRound(round, earlier = []) {
   check(validDate(round?.date), 'Invalid round date');
   try { roundFilename(round.date, round.round); } catch (e) { errors.push(e.message); }
   check(nonempty(round.window) && nonempty(round.captureMethod), 'Round requires window and captureMethod');
+  if (round.source) { try { validateSourceContext(round); } catch (e) { errors.push(e.message); } }
   check(Array.isArray(round.messages), 'Round requires messages array');
   const ids = new Map(earlier.map((m, index) => [m.id, { message: m, index }]));
   const all = [...earlier, ...(round.messages ?? [])];
@@ -201,7 +298,7 @@ export function validateRound(round, earlier = []) {
     check(safeId(message.id), `Invalid message ID: ${message.id}`);
     check(!ids.has(message.id), `Duplicate message ID: ${message.id}`);
     check(nonempty(message.speaker) && !/^(unknown|未知|发言人待确认)$/i.test(message.speaker.trim()), `${message.id}: missing reliable speaker`);
-    check(validTimestamp(message.timestamp), `${message.id}: invalid timestamp`);
+    check(validMessageTime(message), `${message.id}: invalid timestamp or unevidenced timeContext`);
     check(nonempty(message.body) || (Array.isArray(message.media) && message.media.length > 0), `${message.id}: empty body without media`);
     check(message.body === undefined || typeof message.body === 'string', `${message.id}: body must be a string`);
     check(message.media === undefined || Array.isArray(message.media), `${message.id}: media must be an array`);
@@ -241,10 +338,14 @@ export function validateRound(round, earlier = []) {
     check(c.evidence?.length > 0 && c.limitations?.length === 0, 'Complete round needs evidence and no known limitations');
     const e = round.captureEvidence;
     check(e && list(e.textSources) && e.textSources.length && list(e.screenshotRefs) && e.screenshotRefs.length, 'Complete capture needs text sources and screenshot attribution references');
-    check(e?.speakerVerification === 'all' && ['visible_end', 'two_identical_bottom_states'].includes(e?.endDetection), 'Complete capture needs every speaker verified and a detected end');
+    check(e?.speakerVerification === 'all' && (round.source || ['visible_end', 'two_identical_bottom_states'].includes(e?.endDetection)), 'Complete capture needs every speaker verified and a detected end');
   }
   if ((round.messages ?? []).some(m => (m.media ?? []).some(media => ['preview', 'unavailable'].includes(media.status)))) {
     check(c?.status === 'incomplete' && c.limitations?.length > 0, 'Preview or unavailable media requires incomplete status and an explicit media limitation');
+  }
+  if (round.timePrecision) {
+    const precision = timePrecision(round.messages ?? []);
+    check(['exact', 'separator', 'notDisplayed'].every(key => round.timePrecision[key] === precision[key]), 'Time precision counts do not match retained messages');
   }
   try { validateParticipants(round.participants ?? []); } catch (e) { errors.push(e.message); }
   return { valid: !errors.length, errors, counts: { messages: round.messages?.length ?? 0, media: (round.messages ?? []).reduce((n,m) => n + (m.media?.length ?? 0), 0), replies: (round.messages ?? []).filter(m => m.quote?.targetId).length, speakers: new Set(all.map(m => m.speaker)).size }, status: c?.status };
@@ -276,10 +377,14 @@ export function renderMarkdown(round, allMessages = []) {
   const filename = roundFilename(round.date, round.round);
   const byId = new Map([...allMessages, ...round.messages].map(m => [m.id, m]));
   const c = round.completeness;
-  const lines = ['# 微信聊天记录', '', `- 抓取日期：${round.date}`, `- 轮次：${round.round}`, `- 原窗口：${md(round.window)}`, `- 消息时间范围：${md(round.messages[0]?.timestamp ?? '无新消息')}—${md(round.messages.at(-1)?.timestamp ?? '无新消息')}`, `- 提取方式：${md(round.captureMethod)}`, `- 完整性：${c.status === 'complete' ? '完整' : '不完整'}；共识别 ${c.recognizedItems} 个记录项；保留 ${round.messages.length} 条消息，包含 ${round.messages.reduce((n,m) => n + (m.media?.length ?? 0), 0)} 个媒体项；前轮重叠 ${round.continuity.overlap} 条；明确跳过 ${c.skippedMedia} 个媒体项。`, `- 发言人：${round.captureEvidence?.speakerVerification === 'all' ? '全部已核对' : '未全部核对；本轮不得标记完整'}`, `- 与上一轮衔接：${round.continuity.anchorId ? `以前一轮末条消息 ${round.continuity.anchorId} 为重叠锚点；本文件不重复收录该消息。` : '首轮，无前轮锚点。'}`, `- 证据：${md(c.evidence.join('；') || '未提供')}`, `- 已知限制：${md(c.limitations.join('；') || '无')}`, `- 结构化数据：${md(filename.replace(/\.md$/, '.json'))}`, ''];
+  const lines = ['# 微信聊天记录', '', `- 抓取日期：${round.date}`, `- 轮次：${round.round}`, `- 原窗口：${md(round.window)}`, `- 消息时间范围：${md(round.messages.length ? timestampDisplay(round.messages[0]) : '无新消息')}—${md(round.messages.length ? timestampDisplay(round.messages.at(-1)) : '无新消息')}`, `- 提取方式：${md(round.captureMethod)}`, `- 完整性：${c.status === 'complete' ? '完整' : '不完整'}；共识别 ${c.recognizedItems} 个记录项；保留 ${round.messages.length} 条消息，包含 ${round.messages.reduce((n,m) => n + (m.media?.length ?? 0), 0)} 个媒体项；前轮重叠 ${round.continuity.overlap} 条；明确跳过 ${c.skippedMedia} 个媒体项。`, `- 发言人：${round.captureEvidence?.speakerVerification === 'all' ? '全部已核对' : '未全部核对；本轮不得标记完整'}`, `- 与上一轮衔接：${round.continuity.anchorId ? `以前一轮末条消息 ${round.continuity.anchorId} 为重叠锚点；本文件不重复收录该消息。` : '首轮，无前轮锚点。'}`, `- 证据：${md(c.evidence.join('；') || '未提供')}`, `- 已知限制：${md(c.limitations.join('；') || '无')}`, `- 结构化数据：${md(filename.replace(/\.md$/, '.json'))}`, ''];
+  if (round.source) {
+    const precision = timePrecision(round.messages);
+    lines.splice(5, 0, `- 来源模式：${md(round.source.mode)}`, `- 来源身份：${md(round.source.subjectId)} / ${md(round.source.scopeId)}`, `- 指定范围：${md(round.requestedRange.label)}`, `- 捕获方向：${md(round.captureOrder)}`, `- 时间精度：逐条时间 ${precision.exact} 条；仅分隔标注 ${precision.separator} 条；未显示时间 ${precision.notDisplayed} 条。完整性描述指定范围的内容覆盖，不代表每条具有精确时间。`);
+  }
   for (const m of round.messages) {
     const bodyLines = (m.body || '[媒体]').split('\n');
-    lines.push(`- <a id="${m.id}"></a> **${md(m.timestamp)}** · **${md(m.speaker)}**：${md(bodyLines[0])}`);
+    lines.push(`- <a id="${m.id}"></a> **${md(timestampDisplay(m))}** · **${md(m.speaker)}**：${md(bodyLines[0])}`);
     for (const line of bodyLines.slice(1)) lines.push(`  ${md(line).replace(/^(?:- |>)/, value => `\\${value}`)}`);
     if (m.quote) {
       const q = m.quote;
@@ -304,9 +409,14 @@ export function parseMarkdown(markdown, filename) {
   let current = null;
   for (const [index, line] of lines.entries()) {
     if (line.startsWith('- <a')) {
-      const match = line.match(/^- <a id="([^"]+)"><\/a> \*\*([^*]+)\*\* · \*\*((?:\\.|[^*])+)\*\*：(.*)$/);
+      const match = line.match(/^- <a id="([^"]+)"><\/a> \*\*((?:\\.|[^*])+)\*\* · \*\*((?:\\.|[^*])+)\*\*：(.*)$/);
       assert(match, `${filename}:${index + 1}: malformed message header or missing speaker`);
       current = { id: match[1], timestamp: unmd(match[2]), speaker: unmd(match[3]), body: unmd(match[4]), roundFile: path.basename(filename) };
+      const separator = current.timestamp.match(/^时间未逐条显示（分隔标注：(.*)）$/);
+      if (separator || current.timestamp === '时间未显示') {
+        current.timestamp = null;
+        current.timeContext = { kind: separator ? 'separator' : 'not_displayed', ...(separator ? { label: separator[1] } : {}), evidence: ['Markdown precision display; consult JSON for original capture evidence'] };
+      }
       messages.push(current);
     } else if (current && /^\s+- 回复：/.test(line)) {
       const linked = line.match(/^\s+- 回复：\[([^\]]+)\]\(([^)]*)#([^)]*)\)(（推定）)?$/);
@@ -321,7 +431,7 @@ export function parseMarkdown(markdown, filename) {
     } else if (current && /^  /.test(line) && !/^  - 媒体：/.test(line)) current.body += `\n${unmd(line.slice(2))}`;
   }
   for (const m of messages) {
-    assert(safeId(m.id) && validTimestamp(m.timestamp) && nonempty(m.speaker) && !/^(unknown|未知|发言人待确认)$/i.test(m.speaker) && nonempty(m.body), `${filename}: invalid message ${m.id}`);
+    assert(safeId(m.id) && validMessageTime(m) && nonempty(m.speaker) && !/^(unknown|未知|发言人待确认)$/i.test(m.speaker) && nonempty(m.body), `${filename}: invalid message ${m.id}`);
     if (m.quote) assert(nonempty(m.quote.text), `${filename}: empty quote ${m.id}`);
   }
   return messages;
@@ -366,6 +476,14 @@ export async function readArchive(root) {
       m.quote.text = m.quote.text.slice(targetSpeakerPrefix.length);
     }
   }
+  const sourceRounds = rounds.filter(round => round.source);
+  if (sourceRounds.length) {
+    const first = sourceRounds[0].source;
+    for (const round of sourceRounds) assert(sameSource(first, round.source), 'Archive contains conflicting conversation or scope identities');
+    let metadata;
+    try { metadata = JSON.parse(await fs.readFile(path.join(root, 'archive.json'), 'utf8')); } catch (e) { if (e.code !== 'ENOENT') throw e; }
+    if (metadata?.sourceBinding) assert(sameSource(first, metadata.sourceBinding), 'Archive manifest source binding disagrees with saved rounds');
+  }
   return { rounds, messages };
 }
 
@@ -386,9 +504,13 @@ export function buildHtml(archive) {
       const url = item.path?.split('/').map(encodeURIComponent).join('/');
       return `<figure>${url && item.kind !== 'file' ? `<a href="${html(url)}"><img loading="lazy" src="${html(url)}" alt="${html(item.alt ?? `媒体：${item.status}`)}"></a>` : ''}<figcaption>${html(item.status)}${item.width ? ` · ${item.width} × ${item.height}` : ''}${item.kind === 'file' ? ' · 原文件已保留，阅读器不解码' : ''}${item.path ? ` · ${html(item.path)}` : ' · 无本地文件'}</figcaption></figure>`;
     }).join('');
-    return `<article id="${html(m.id)}" data-speaker="${html(m.speaker)}" data-date="${html(date)}" data-media="${(m.media ?? []).length ? 'yes' : 'no'}" data-quote="${html(m.quote?.status ?? 'none')}"><header><a href="#${html(m.id)}">${html(m.timestamp)}</a> <strong>${html(m.speaker)}</strong>${aliases.has(m.speaker) ? ` <span>(${html(aliases.get(m.speaker))})</span>` : ''} <small>${html(m.id)}</small></header><p>${html(m.body || '[媒体]')}</p>${quote}${media}</article>`;
+    return `<article id="${html(m.id)}" data-speaker="${html(m.speaker)}" data-date="${html(date)}" data-media="${(m.media ?? []).length ? 'yes' : 'no'}" data-quote="${html(m.quote?.status ?? 'none')}"><header><a href="#${html(m.id)}">${html(timestampDisplay(m))}</a> <strong>${html(m.speaker)}</strong>${aliases.has(m.speaker) ? ` <span>(${html(aliases.get(m.speaker))})</span>` : ''} <small>${html(m.id)}</small></header><p>${html(m.body || '[媒体]')}</p>${quote}${media}</article>`;
   }).join('\n');
-  const report = archive.rounds.map(r => `<li>${html(r.date)} / ${html(r.round)}：${r.completeness.status === 'complete' ? '完整' : '不完整'}；${r.messages.length} 条消息；${r.messages.reduce((n,m) => n + (m.media?.length ?? 0), 0)} 媒体项${r.completeness.limitations.length ? `；${html(r.completeness.limitations.join('；'))}` : ''}</li>`).join('');
+  const report = archive.rounds.map(r => {
+    const precision = timePrecision(r.messages);
+    const source = r.source ? `；${html(r.source.mode)}；指定范围：${html(r.requestedRange.label)}；逐条时间 ${precision.exact}，仅分隔标注 ${precision.separator}，未显示时间 ${precision.notDisplayed}（完整性指内容覆盖）` : '';
+    return `<li>${html(r.date)} / ${html(r.round)}：${r.completeness.status === 'complete' ? '完整' : '不完整'}；${r.messages.length} 条消息；${r.messages.reduce((n,m) => n + (m.media?.length ?? 0), 0)} 媒体项${source}${r.completeness.limitations.length ? `；${html(r.completeness.limitations.join('；'))}` : ''}</li>`;
+  }).join('');
   return `<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; connect-src 'none'"><title>微信聊天归档</title><style>body{font:16px/1.6 system-ui,sans-serif;color:#202024;background:#fff;margin:0}main{max-width:960px;margin:auto;padding:24px}h1{font-size:26px}.controls{display:flex;gap:8px;flex-wrap:wrap;position:sticky;top:0;background:#fff;padding:12px 0;border-bottom:1px solid #ccc}input,select,button{font:inherit;padding:6px;border:1px solid #aaa;border-radius:4px;max-width:100%;box-sizing:border-box}input{flex:1;min-width:160px}article{padding:18px 0;border-bottom:1px solid #ddd;scroll-margin-top:120px}article:target{background:#eaf5fb}header small,figcaption{color:#61616b;font-size:13px}header,figcaption{overflow-wrap:anywhere}p,blockquote{white-space:pre-wrap;overflow-wrap:anywhere}blockquote{border-left:3px solid #b7bdc5;padding-left:14px;margin-left:12px}figure{margin:12px 0}img{max-width:100%;height:auto;max-height:600px}a{color:#12628a}footer{margin-top:6px;font-size:14px}[hidden]{display:none!important}@media(max-width:640px){.controls{position:static}article{scroll-margin-top:12px}main{padding:16px}}</style></head><body><main><h1>微信聊天归档</h1><details><summary>归档状态与证据限制</summary><ul>${report}</ul></details><div class="controls"><input id="search" type="search" aria-label="搜索正文、发言人、引用" placeholder="搜索"><select id="speaker" aria-label="发言人"><option value="">全部发言人</option>${speakers.map(s => `<option>${html(s)}</option>`).join('')}</select><select id="date" aria-label="抓取日期"><option value="">全部抓取日期</option>${dates.map(d => `<option>${html(d)}</option>`).join('')}</select><select id="media" aria-label="媒体"><option value="">全部消息</option><option value="yes">含媒体</option><option value="no">无媒体</option></select><select id="quote" aria-label="引用"><option value="">全部引用状态</option>${['none', ...QUOTE_STATUSES].map(s => `<option>${s}</option>`).join('')}</select><button id="reset" type="button">重置</button></div><p id="count" aria-live="polite"></p>${cards}</main><script>
 const articles=[...document.querySelectorAll('article')];
@@ -448,7 +570,8 @@ export async function buildArchive(root) {
   }
   const derivatives = { 'PARTICIPANTS.json': `${JSON.stringify(participants, null, 2)}\n`, 'PARTICIPANTS.md': renderParticipants(participants), 'index.html': buildHtml(archive) };
   for (const [filename, content] of Object.entries(derivatives)) await atomicReplace(path.join(root, filename), content);
-  await atomicReplace(path.join(root, 'archive.json'), `${JSON.stringify({ ...metadata, generatedHashes: Object.fromEntries(Object.entries(derivatives).map(([name, content]) => [name, digest(content)])) }, null, 2)}\n`);
+  const source = archive.rounds.find(round => round.source)?.source;
+  await atomicReplace(path.join(root, 'archive.json'), `${JSON.stringify({ ...metadata, ...(source ? { sourceBinding: { subjectId: source.subjectId, scopeId: source.scopeId } } : {}), generatedHashes: Object.fromEntries(Object.entries(derivatives).map(([name, content]) => [name, digest(content)])) }, null, 2)}\n`);
   return { rounds: archive.rounds.length, messages: archive.messages.length, media: archive.messages.reduce((n,m) => n + (m.media?.length ?? 0), 0), incompleteRounds: archive.rounds.filter(r => r.completeness.status !== 'complete').length };
 }
 
@@ -461,6 +584,12 @@ export async function importCapture(root, capture, { allowIncomplete = false } =
   let tempDirectory;
   try {
     const archive = await readArchive(root);
+    assert(capture.source, 'New captures require an observed source identity and scope; old rounds remain readable');
+    validateSourceContext({ ...capture, messages: [] });
+    const binding = metadata.sourceBinding ?? archive.rounds.find(round => round.source)?.source;
+    if (binding) assert(sameSource(binding, capture.source), 'Wrong conversation or capture scope: use its own archive directory');
+    else if (archive.rounds.length) assert(list(capture.source.legacyBindingEvidence) && capture.source.legacyBindingEvidence.length,
+      'Binding a legacy archive requires explicit legacyBindingEvidence; never infer the original conversation');
     const date = capture.date, roundNumber = capture.round ?? '01', filename = roundFilename(date, roundNumber);
     const destination = path.join(root, 'IMPORT', filename), sidecar = destination.replace(/\.md$/, '.json');
     assert(!await exists(destination) && !await exists(sidecar), `Round already exists: ${filename}; never renumber or overwrite`);
@@ -468,23 +597,35 @@ export async function importCapture(root, capture, { allowIncomplete = false } =
       const latest = archive.rounds.at(-1);
       assert(date > latest.date || (date === latest.date && Number(roundNumber) > Number(latest.round)), 'New round must follow the latest archived date and round');
     }
-    const merged = capture.pages ? mergePages(capture.pages) : { messages: structuredClone(capture.messages ?? []), overlaps: [] };
     assert(!(capture.pages && capture.messages), 'Capture must use pages or messages, not both');
-    assert(Array.isArray(merged.messages), 'messages must be an array');
-    for (const message of merged.messages) if (message.media) {
-      assert(Array.isArray(message.media), 'media must be an array');
-      message.media = await Promise.all(message.media.map(media => verifyMedia(root, media)));
+    const captured = structuredClone(capture);
+    const groups = captured.pages ? captured.pages.map(page => page.messages) : [captured.messages ?? []];
+    for (const group of groups) {
+      assert(Array.isArray(group), 'Each captured page requires messages');
+      for (const message of group) {
+        message.timestampRaw ??= message.timestamp ?? message.timeContext?.label ?? null;
+        if (message.timestamp !== null) message.timestamp = normalizeWechatTimestamp(message.timestamp);
+        else assert(validMessageTime(message), 'Missing per-message time requires an evidenced timeContext, never an invented exact timestamp');
+        if (message.media) {
+          assert(Array.isArray(message.media), 'media must be an array');
+          message.media = await Promise.all(message.media.map(media => verifyMedia(root, media)));
+        }
+      }
     }
+    const merged = captured.pages ? mergePages(captured.pages, { captureOrder: capture.captureOrder }) : { messages: captured.messages ?? [], overlaps: [] };
+    assert(captured.pages || capture.captureOrder === 'older_to_newer', 'A flat messages input must already be older_to_newer; captureOrder reverses pages only');
     const trimmed = trimIncremental(merged.messages, archive.messages, capture.anchorId);
     const prefix = `${date.replaceAll('-', '')}${roundNumber === '01' ? '' : `-${roundNumber}`}`;
     for (const [index, message] of trimmed.messages.entries()) {
-      assert(validTimestamp(message.timestamp) && message.timestamp.includes(' '), 'New messages require source-confirmed YYYY-MM-DD HH:MM[:SS] timestamps; do not infer dates from extraction filenames');
+      assert(message.timestamp === null || (validTimestamp(message.timestamp) && message.timestamp.includes(' ')), 'New displayed message times require source-confirmed YYYY-MM-DD HH:MM[:SS]; use timestamp:null with timeContext for non-displayed per-message times');
       message.id ??= `${prefix}-${String(index + 1).padStart(3, '0')}`;
       assert(message.id.startsWith(`${prefix}-`), 'New message ID must use its round filename prefix');
       message.roundFile = filename;
     }
     resolveQuotes(trimmed.messages, archive.messages);
-    const round = { schemaVersion: 1, date, round: roundNumber, window: capture.window, captureMethod: capture.captureMethod, captureEvidence: capture.captureEvidence ?? {}, completeness: capture.completeness, participants: capture.participants ?? [], continuity: { anchorId: trimmed.anchorId, overlap: trimmed.overlap, pageOverlaps: merged.overlaps }, messages: trimmed.messages };
+    const round = { schemaVersion: 1, date, round: roundNumber, window: capture.window, source: captured.source, requestedRange: captured.requestedRange, captureOrder: captured.captureOrder, boundaries: captured.boundaries ?? {}, captureMethod: capture.captureMethod, captureEvidence: capture.captureEvidence ?? {}, completeness: capture.completeness, participants: capture.participants ?? [], continuity: { anchorId: trimmed.anchorId, overlap: trimmed.overlap, pageOverlaps: merged.overlaps }, messages: trimmed.messages };
+    if (captured.pages) round.continuity.pageEvidence = captured.pages.map((page, capturedIndex) => ({ capturedIndex, orderEvidence: page.orderEvidence ?? [], ...(page.overlap ? { reviewedOverlap: page.overlap } : {}), ...(page.contiguousEvidence ? { contiguousEvidence: page.contiguousEvidence } : {}) }));
+    round.timePrecision = timePrecision(round.messages);
     const result = validateRound(round, archive.messages);
     assert(result.valid, result.errors.join('\n'));
     assert(allowIncomplete || round.completeness.status === 'complete', 'Capture is incomplete; use --allow-incomplete to preserve an explicitly incomplete round');

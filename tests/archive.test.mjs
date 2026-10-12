@@ -4,12 +4,13 @@ import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import vm from 'node:vm';
-import { initArchive, importCapture, readArchive, mergePages, trimIncremental, validateRound, buildHtml, safeAssetPath, verifyMedia, parseMarkdown, renderMarkdown, imageInfo, buildArchive, parseRoundFilename, main } from '../skills/archive-wechat-chat/scripts/archive.mjs';
+import { initArchive, importCapture, readArchive, mergePages, trimIncremental, validateRound, buildHtml, safeAssetPath, verifyMedia, parseMarkdown, renderMarkdown, imageInfo, buildArchive, parseRoundFilename, main, normalizeWechatTimestamp, messageIdentity } from '../skills/archive-wechat-chat/scripts/archive.mjs';
+import { createHash } from 'node:crypto';
 import { validateMarkdownFiles } from '../skills/archive-wechat-chat/scripts/validate-chat-round.mjs';
 import { createSyntheticPng } from '../examples/synthetic/image-fixture.mjs';
 
-const msg = (body, timestamp = '2026-10-11 09:00', speaker = 'Synthetic Alice') => ({ speaker, timestamp, body });
-const capture = (messages, overrides = {}) => ({ date: '2026-10-11', round: '01', window: 'Synthetic Chat History', captureMethod: 'Synthetic accessibility + synthetic screenshots', captureEvidence: { textSources: ['synthetic accessibility fixture'], screenshotRefs: ['synthetic screenshot context'], speakerVerification: 'all', endDetection: 'visible_end' }, completeness: { status: 'complete', recognizedItems: messages.length, skippedMedia: 0, evidence: ['Synthetic end marker and checked attribution'], limitations: [] }, participants: [], messages, ...overrides });
+const msg = (body, timestamp = '2026-10-11 09:00', speaker = 'Synthetic Alice') => ({ speaker, timestamp, body, evidence: { speaker: ['Synthetic speaker screenshot'], body: ['Synthetic AX full message'], timestamp: ['Synthetic explicit date/time label'] } });
+const capture = (messages, overrides = {}) => ({ date: '2026-10-11', round: '01', window: 'Synthetic Chat History', source: { mode: 'merged_forward', subjectId: 'synthetic-conversation', scopeId: 'synthetic-forward-artifact', title: 'Synthetic Chat History', identityEvidence: ['Synthetic group and prepared forward artifact identity'] }, captureOrder: 'older_to_newer', requestedRange: { label: 'Entire synthetic forward artifact', evidence: ['Synthetic requested artifact'] }, boundaries: { start: { kind: 'visible_marker', direction: 'toward_older', evidence: ['Synthetic start marker'] }, end: { kind: 'visible_marker', direction: 'toward_newer', evidence: ['Synthetic end marker'] } }, captureMethod: 'Synthetic accessibility + synthetic screenshots', captureEvidence: { textSources: ['synthetic accessibility fixture'], screenshotRefs: ['synthetic screenshot context'], speakerVerification: 'all', endDetection: 'visible_end' }, completeness: { status: 'complete', recognizedItems: messages.length, skippedMedia: 0, evidence: ['Synthetic end marker and checked attribution'], limitations: [] }, participants: [], messages, ...overrides });
 async function temp(t) { const root = await fs.mkdtemp(path.join(os.tmpdir(), 'wechat-synthetic-')); t.after(() => fs.rm(root, { recursive: true, force: true })); return root; }
 const png = createSyntheticPng(1, 1);
 
@@ -136,7 +137,7 @@ test('media file checks distinguish original download from native save and scree
   assert.equal((await verifyMedia(root, { ...saved, source: 'screenshot', status: 'preview' })).status, 'preview');
   await fs.writeFile(path.join(root, 'assets', 'unsafe.svg'), '<svg onload="alert(1)"/>');
   await assert.rejects(verifyMedia(root, { ...saved, path: 'assets/unsafe.svg' }), /Unsupported/);
-  const input = capture([{ speaker: 'Synthetic Alice', timestamp: '2026-10-11 09:00', media: [saved, { status: 'unavailable', source: 'unknown', evidence: ['Synthetic source not accessible'] }] }]);
+  const input = capture([{ ...msg(''), media: [saved, { status: 'unavailable', source: 'unknown', evidence: ['Synthetic source not accessible'] }] }]);
   await assert.rejects(importCapture(root, input), /requires incomplete/);
   input.completeness.status = 'incomplete'; input.completeness.limitations = ['Synthetic image bytes unavailable'];
   await importCapture(root, input, { allowIncomplete: true }); const archive = await readArchive(root);
@@ -219,6 +220,7 @@ test('legacy round filenames preserve first-round ordering and quote speaker ide
   const archive = await readArchive(root); assert.deepEqual(archive.rounds.map(r => r.round), ['01', '02']);
   assert.equal(archive.messages[1].quote.speaker, 'Synthetic A'); assert.equal(archive.messages[1].quote.text, 'Old');
   const next = capture([{ speaker: 'Synthetic B', timestamp: '09:01', body: 'Reply', quote: { speaker: 'Synthetic A', text: 'Old', status: 'exact', targetId: '20260725-001' } }, msg('New', '2026-10-11 09:02')]);
+  next.source.legacyBindingEvidence = ['Synthetic legacy files confirmed as this synthetic conversation'];
   assert.equal((await importCapture(root, next)).overlap, 1);
   assert.deepEqual(parseRoundFilename('2026-07-25-微信聊天记录.md'), { date: '2026-07-25', round: '01' });
 });
@@ -252,4 +254,131 @@ test('macOS decoder rejects header-only fake images', { skip: process.platform !
   const root = await temp(t); await initArchive(root); const fake = Buffer.alloc(24); png.copy(fake, 0, 0, 24);
   await fs.writeFile(path.join(root, 'assets', 'fake.png'), fake);
   await assert.rejects(verifyMedia(root, { status: 'saved_unverified', source: 'native_save', evidence: ['Synthetic corrupt fixture'], path: 'assets/fake.png' }), /decode failed/);
+});
+
+test('nonpadded full dates normalize without losing the source label', async t => {
+  assert.equal(normalizeWechatTimestamp('2026-3-4 09:05'), '2026-03-04 09:05');
+  assert.equal(normalizeWechatTimestamp('2026-8-2 1:18:03'), '2026-08-02 01:18:03');
+  assert.throws(() => normalizeWechatTimestamp('2026-2-30 09:00'), /Invalid timestamp/);
+  assert.throws(() => normalizeWechatTimestamp('昨天 09:00'), /without a confirmed full date/);
+  const root = await temp(t); await initArchive(root); await importCapture(root, capture([msg('Message', '2026-3-4 09:05')]));
+  const message = (await readArchive(root)).messages[0];
+  assert.equal(message.timestampRaw, '2026-3-4 09:05'); assert.equal(message.timestamp, '2026-03-04 09:05');
+});
+
+test('source binding rejects unrelated conversations and forward scopes before publication', async t => {
+  const root = await temp(t); await initArchive(root); const source = capture([]).source;
+  const missing = capture([msg('First')]); delete missing.source;
+  await assert.rejects(importCapture(root, missing), /require an observed source/);
+  assert.equal(JSON.parse(await fs.readFile(path.join(root, 'archive.json'), 'utf8')).sourceBinding, undefined);
+  await importCapture(root, capture([msg('First')]));
+  const other = capture([msg('First'), msg('Second')], { round: '02', source: { ...source, subjectId: 'different-chat' } });
+  await assert.rejects(importCapture(root, other), /Wrong conversation/);
+  other.source = { ...source, scopeId: 'different-forward-card' };
+  await assert.rejects(importCapture(root, other), /Wrong conversation/);
+  assert.equal((await readArchive(root)).messages.length, 1);
+  assert.deepEqual(JSON.parse(await fs.readFile(path.join(root, 'archive.json'), 'utf8')).sourceBinding, { subjectId: source.subjectId, scopeId: source.scopeId });
+});
+
+test('newer-to-older scanning reverses pages only and preserves display sequence', async t => {
+  const root = await temp(t); await initArchive(root);
+  const a = msg('oldest', '2026-10-11 08:00'), b = msg('middle', '2026-10-11 08:01'), c = msg('newest', '2026-10-11 08:02');
+  const input = capture([], { captureOrder: 'newer_to_older', pages: [{ messages: [b,c] }, { messages: [a,b] }] }); delete input.messages;
+  input.completeness.recognizedItems = 3;
+  await importCapture(root, input);
+  assert.deepEqual((await readArchive(root)).messages.map(m => m.body), ['oldest','middle','newest']);
+  assert.deepEqual((await readArchive(root)).messages.map(m => m.id), ['20261011-001','20261011-002','20261011-003']);
+});
+
+test('repeated page overlaps require reviewed occurrence evidence', () => {
+  const a = msg('Same');
+  assert.throws(() => mergePages([{ messages: [a,a] }, { messages: [a,a,msg('new')] }]), /ambiguous repeated overlap/);
+  const reviewed = mergePages([{ messages: [a,a] }, { messages: [a,a,msg('new')], overlap: { count: 1, evidence: ['Synthetic screenshots show one old occurrence and one new repeat'] } }]);
+  assert.equal(reviewed.messages.length, 4); assert.deepEqual(reviewed.overlaps, [0,1]);
+  assert.throws(() => mergePages([{ messages: [a] }, { messages: [msg('new')], overlap: { count: 1, evidence: ['wrong'] } }]), /disagrees/);
+});
+
+test('overlap unions author and text evidence recovered from adjacent screenshots', () => {
+  const partial = msg('Long full AX message'); partial.evidence.speaker = [];
+  const verified = msg('Long full AX message'); verified.evidence.speaker = ['Synthetic second screenshot shows complete author']; verified.evidence.body = ['Second AX snapshot'];
+  const result = mergePages([{ messages: [partial] }, { messages: [verified, msg('Next')] }]);
+  assert.deepEqual(result.messages[0].evidence.speaker, verified.evidence.speaker);
+  assert.deepEqual(result.messages[0].evidence.body, ['Synthetic AX full message', 'Second AX snapshot']);
+});
+
+test('repeated incremental anchor can be resolved only by a unique ordered context', () => {
+  const a = { ...msg('distinct predecessor'), id: 'old-1' }, b = { ...msg('repeat'), id: 'old-2' };
+  const result = trimIncremental([a,b,msg('new'),b], [a,b]);
+  assert.equal(result.overlap, 2); assert.equal(result.messages.length, 2);
+  assert.throws(() => trimIncremental([b,msg('new'),b], [a,b]), /Ambiguous/);
+});
+
+test('complete source capture requires both directed boundaries and settled edge proof', async t => {
+  const root = await temp(t); await initArchive(root);
+  const input = capture([msg('First')]); delete input.boundaries.start;
+  await assert.rejects(importCapture(root, input), /start boundary/);
+  input.boundaries = capture([]).boundaries; input.boundaries.end = { kind: 'confirmed_scroll_boundary', direction: 'toward_newer', evidence: ['Same text twice'] };
+  await assert.rejects(importCapture(root, input), /unchanged viewport alone/);
+  input.boundaries.end.positionEvidence = ['Synthetic scrollbar at bottom']; input.boundaries.end.settledEvidence = ['Synthetic loading completed and final row checked'];
+  input.messages[0].evidence.speaker = [];
+  await assert.rejects(importCapture(root, input), /per-message speaker/);
+  input.messages[0].evidence.speaker = ['Synthetic author visible in overlapping screenshot']; await importCapture(root, input);
+});
+
+test('history search can claim only the explicitly requested search scope', async t => {
+  const root = await temp(t); await initArchive(root); const input = capture([msg('Result')]); input.source.mode = 'history_search';
+  await assert.rejects(importCapture(root, input), /requested result scope/);
+  input.boundaries.start.kind = 'requested_range'; input.boundaries.end.kind = 'requested_range';
+  input.requestedRange.label = 'Synthetic named search results, not all conversation history'; await importCapture(root, input);
+});
+
+test('existing canonical source-less v1 rounds remain byte-for-byte readable', async t => {
+  const root = await temp(t); await initArchive(root);
+  const round = { ...capture([{ ...msg('Old canonical message'), id: '20261011-001' }]), schemaVersion: 1, continuity: { overlap: 0, anchorId: null } };
+  delete round.source; delete round.captureOrder; delete round.requestedRange; delete round.boundaries;
+  const markdown = renderMarkdown(round); round.markdownSha256 = createHash('sha256').update(markdown).digest('hex');
+  const file = path.join(root, 'IMPORT', '2026-10-11-微信聊天记录.md'); await fs.writeFile(file, markdown); const json = JSON.stringify(round); await fs.writeFile(file.replace(/\.md$/, '.json'), json);
+  assert.equal((await readArchive(root)).messages[0].id, '20261011-001'); assert.equal(await fs.readFile(file, 'utf8'), markdown); assert.equal(await fs.readFile(file.replace(/\.md$/, '.json'), 'utf8'), json);
+  const input = capture([msg('Old canonical message'), msg('Next')], { round: '02' });
+  await assert.rejects(importCapture(root, input), /legacyBindingEvidence/); input.source.legacyBindingEvidence = ['Synthetic old canonical archive belongs to this subject'];
+  assert.equal((await importCapture(root, input)).overlap, 1);
+});
+
+test('main-chat separator times stay contextual while content coverage can be complete', async t => {
+  const root = await temp(t); await initArchive(root);
+  const exact = msg('Explicit source timestamp', '2026-3-4 17:34');
+  const contextual = { ...msg('No individual time label', null), timeContext: { kind: 'separator', label: '17:34', evidence: ['Synthetic separator appears above this group'] } };
+  const absent = { ...msg('No time label anywhere', null), timeContext: { kind: 'not_displayed', evidence: ['Synthetic screenshot and AX show no per-message time'] } };
+  const input = capture([exact, contextual, absent]); input.source.mode = 'main_chat'; input.source.scopeId = 'synthetic-main-history';
+  const result = await importCapture(root, input); assert.equal(result.status, 'complete');
+  const archive = await readArchive(root), round = archive.rounds[0];
+  assert.deepEqual(round.timePrecision, { exact: 1, separator: 1, notDisplayed: 1 });
+  assert.equal(archive.messages[1].timestamp, null); assert.equal(archive.messages[1].timestampRaw, '17:34');
+  assert.equal(archive.messages[2].timestampRaw, null);
+  const markdown = await fs.readFile(result.file, 'utf8');
+  assert.match(markdown, /\*\*时间未逐条显示（分隔标注：17:34）\*\*/); assert.match(markdown, /未显示时间 1 条/);
+  const parsed = parseMarkdown(markdown, path.basename(result.file)); assert.equal(parsed[1].timestamp, null); assert.equal(parsed[1].timeContext.label, '17:34'); assert.equal(parsed[2].timestamp, null);
+  assert.equal((await validateMarkdownFiles([result.file])).messages, 3);
+  const reader = await fs.readFile(path.join(root, 'index.html'), 'utf8'); assert.match(reader, /仅分隔标注 1/); assert.match(reader, /时间未逐条显示（分隔标注：17:34）/);
+  const next = capture([absent, msg('Next', null)], { round: '02' }); next.source = input.source; next.messages[1].timeContext = contextual.timeContext;
+  assert.equal((await importCapture(root, next)).overlap, 1);
+});
+
+test('missing-time identity uses observed context and never invents or infers a date', async t => {
+  const base = { ...msg('Same text', null), timeContext: { kind: 'separator', label: '17:34', evidence: ['Synthetic separator'] } };
+  const later = structuredClone(base); later.timeContext.label = '18:00';
+  assert.notEqual(messageIdentity(base), messageIdentity(later));
+  const otherCapture = structuredClone(base); otherCapture.timeContext.evidence = ['Different screenshot of the same separator']; assert.equal(messageIdentity(base), messageIdentity(otherCapture));
+  const group = structuredClone(base); group.timeContext.contextId = 'separate-observed-group'; assert.notEqual(messageIdentity(base), messageIdentity(group));
+  const root = await temp(t); await initArchive(root);
+  const missing = msg('No timestamp', null); await assert.rejects(importCapture(root, capture([missing])), /evidenced timeContext/);
+  const guessedDate = structuredClone(base); guessedDate.timeContext.date = '2026-10-11'; await assert.rejects(importCapture(root, capture([guessedDate])), /evidenced timeContext/);
+  guessedDate.timeContext.dateEvidence = ['Synthetic date header visible, not extraction filename']; await importCapture(root, capture([guessedDate]));
+  assert.equal((await readArchive(root)).messages[0].timestamp, null);
+});
+
+test('unverified main author cannot enter canonical messages under a fabricated placeholder', async t => {
+  const root = await temp(t); await initArchive(root); const input = capture([msg('Unattributed self-side text', '2026-10-11 17:34', 'unknown')]); input.source.mode = 'main_chat';
+  await assert.rejects(importCapture(root, input), /missing reliable speaker/);
+  assert.equal((await readArchive(root)).messages.length, 0); assert.equal(input.messages[0].body, 'Unattributed self-side text');
 });
