@@ -51,6 +51,57 @@ test("installer refuses to replace a populated directory that is not this skill"
   assert.equal(await fs.readFile(path.join(destination, "keep.txt"), "utf8"), "keep me");
 });
 
+test("Claude installation includes read-only workers and can be repeated without changing them", async () => {
+  const destination = path.join(temporaryRoot, "claude project", ".claude", "skills", "archive-wechat-chat");
+  const backup = path.join(temporaryRoot, "claude backups");
+  const args = [installer, "--client", "claude", "--with-agents", "--thinking-model", "inherit", "--execution-model", "haiku", "--dest", destination, "--backup-dir", backup];
+  for (let run = 0; run < 2; run++) {
+    const result = spawnSync(process.execPath, args, { encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+  }
+  const installed = await fs.readFile(path.join(destination, "SKILL.md"), "utf8");
+  assert.equal(installed, await fs.readFile(path.join(root, "skills/archive-wechat-chat/SKILL.md"), "utf8"));
+  const worker = await fs.readFile(path.join(path.dirname(path.dirname(destination)), "agents/wechat-transcriber.md"), "utf8");
+  assert.match(worker, /^model: haiku$/m);
+  assert.match(worker, /^tools: Read, Glob, Grep$/m);
+  const reviewer = await fs.readFile(path.join(path.dirname(path.dirname(destination)), "agents/wechat-reviewer.md"), "utf8");
+  assert.match(reviewer, /^model: inherit$/m);
+  await fs.access(path.join(destination, "references/claude-code.md"));
+  const help = spawnSync(process.execPath, [path.join(destination, "scripts/archive.mjs"), "--help"], { encoding: "utf8" });
+  assert.equal(help.status, 0, help.stderr);
+});
+
+test("Claude installer preserves a conflicting user agent and leaves skill uninstalled", async () => {
+  const config = path.join(temporaryRoot, "claude conflict", ".claude");
+  await fs.mkdir(path.join(config, "agents"), { recursive: true });
+  const existing = path.join(config, "agents/wechat-transcriber.md");
+  await fs.writeFile(existing, "user-owned agent");
+  const destination = path.join(config, "skills/archive-wechat-chat");
+  const result = spawnSync(process.execPath, [installer, "--client", "claude", "--with-agents", "--thinking-model", "inherit", "--execution-model", "haiku", "--dest", destination], { encoding: "utf8" });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /Existing agent differs/);
+  assert.equal(await fs.readFile(existing, "utf8"), "user-owned agent");
+  await assert.rejects(fs.access(destination), { code: "ENOENT" });
+});
+
+test("installer rejects invalid clients and Claude-only flags before mutation", () => {
+  for (const args of [["--client", "invalid"], ["--client"], ["--with-agents"]]) {
+    const result = spawnSync(process.execPath, [installer, ...args], { encoding: "utf8" });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /client/);
+  }
+});
+
+test("Claude workers require explicit choices for both models", async () => {
+  const destination = path.join(temporaryRoot, "unselected models", ".claude/skills/archive-wechat-chat");
+  for (const extra of [[], ["--thinking-model", "inherit"], ["--execution-model", "haiku"]]) {
+    const result = spawnSync(process.execPath, [installer, "--client", "claude", "--with-agents", "--dest", destination, ...extra], { encoding: "utf8" });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /Ask the user/);
+    await assert.rejects(fs.access(destination), { code: "ENOENT" });
+  }
+});
+
 test("installer refuses source checkout and home destinations", async () => {
   for (const destination of [root, os.homedir()]) {
     const result = spawnSync(process.execPath, [installer, "--dest", destination], { encoding: "utf8" });

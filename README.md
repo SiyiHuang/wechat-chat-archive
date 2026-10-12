@@ -1,10 +1,12 @@
-# 微信聊天存档 · Codex Skill
+# 微信聊天存档 · Codex / Claude Code Skill
 
 在 Mac 上，把微信**主聊天窗口**或**独立的合并转发 Chat History 窗口**保存为 Markdown 和可搜索的本地 HTML 阅读页。保留发言人、时间、引用关系、参与者别名和图片文件；继续更新时按消息顺序去重，保留真实的重复发言。
 
-不需要学习 agent，也不需要购买 OCR 服务。Apple Vision OCR 在本机运行。微信操作由你自己的 Codex 桌面能力完成，这个包不读取或解密微信数据库。
+不需要学习 agent，也不需要购买 OCR 服务。Apple Vision OCR 在本机运行。微信操作由你自己的客户端桌面能力完成，这个包不读取或解密微信数据库。
 
 ## 最简单的安装方法
+
+### Codex
 
 在支持本地文件与桌面操作的 Codex 中，把下面这段发给它：
 
@@ -23,11 +25,30 @@ node scripts/install.mjs
 
 本地技能位置和发现方式依据 [OpenAI 官方技能文档](https://learn.chatgpt.com/docs/build-skills)。此仓库分发的是可安装的技能文件夹，不是已上架插件；安装不自动提供微信桌面控制权限。
 
+### Claude Code
+
+把下面这段发给本地 Claude Code：
+
+> 请从 https://github.com/SiyiHuang/wechat-chat-archive 安装微信存档技能。阅读 README，运行 node scripts/install.mjs --client claude 和 doctor，保留已有配置。由当前主 Agent 的模型编排，不要另建编排代理；询问我思考和执行分别用哪些模型，确认后再配置工作代理。检查当前会话是否有微信桌面操作能力；先安装，不抓取聊天。
+
+或在解压后的源码目录执行：
+
+```sh
+node scripts/install.mjs --client claude
+node scripts/doctor.mjs
+```
+
+安装到 `~/.claude/skills/archive-wechat-chat`，随后用 `/archive-wechat-chat` 调用。编排始终使用当前主 Agent 的模型。技能先询问你思考/复核和执行/转录分别用哪些模型，再配置可选只读工作代理；不默认 Sonnet 或 Haiku，也不建议更换主模型做编排。技术用户可在确认选择后加 `--with-agents --thinking-model MODEL --execution-model MODEL`；也可让主聊天串行完成。安装器不改主模型或权限设置，已有不同内容的同名代理会保留并提示处理。
+
+自动操作微信需要当前 Claude Code 会话提供桌面工具。Claude Code Desktop 可按客户端提示启用 computer use；仅装 CLI/技能或能控制 Chrome，不代表能操作原生微信。没有桌面工具时仍支持整理已提供的截图和导出。详细路径与首次验收见 [Claude Code 适配](skills/archive-wechat-chat/references/claude-code.md)，依据 [官方技能文档](https://code.claude.com/docs/en/skills)和 [Desktop 文档](https://code.claude.com/docs/en/desktop#let-claude-use-your-computer)。
+
 ## 开始归档
 
 在 Mac 微信中登录并打开想保存的记录，在 Codex 选择 Sol 或 Astra，然后说：
 
 > 使用 $archive-wechat-chat，把我打开的这段微信聊天保存到文档里的“我的微信档案”。保留图片，说明哪些原图已验证、哪些只能保存微信提供的版本。首次先做一个小范围完整验收，通过后继续；允许按技能说明使用子代理。
+
+Claude Code 使用 `/archive-wechat-chat` 加上同样的要求。两种宿主都由主聊天直接编排，工作代理不接管全局流程。
 
 之后可说：“继续更新同一个档案，只加入新消息。”技能会先检查上次边界，不全局删除同文消息。新手不必手工写 JSON、运行验证或管理子代理。
 
@@ -40,11 +61,11 @@ node scripts/install.mjs
 ## 环境与能力边界
 
 - macOS、已登录的微信、Node.js 20+。OCR 需要 Apple Command Line Tools；缺少时可按提示运行 `xcode-select --install`。Swift 可用时使用 Swift，工具链不匹配时改用同套工具中的 Clang 调用 Apple Vision。不需要额外 npm 依赖。
-- Codex 必须能操作桌面，且获得对应的辅助功能/屏幕权限。技能本身不附带桌面控制服务；没有此能力时只能整理你提供的导出和截图。
+- 当前 Codex 或 Claude Code 会话必须能操作桌面，且获得对应的辅助功能/屏幕权限。技能本身不附带桌面控制服务；没有此能力时只能整理你提供的导出和截图。
 - Apple Vision 负责本地 OCR，不调用订阅 OCR API。Apple silicon 上可列出 Vision 提供的计算设备，默认由系统调度；**不能保证 OCR 一定使用 Neural Engine**。详见 [Apple OCR](skills/archive-wechat-chat/references/apple-ocr.md)。
 - 保存图片使用微信查看器的保存功能。**微信能导出文件不等于发送者原图已恢复**；没有明确原图下载或发送端证据时标为原图未验证。截图只作证据/预览。详见 [图片规则](skills/archive-wechat-chat/references/media-capture.md)。
-- OCR 和生成的阅读页本地运行，但交给 Codex 核对的文本及截图仍可能经过当前模型服务处理。“本地 OCR”不代表整个归档过程完全离线。
-- 首次由 Sol/Astra 核验，后续 Sol + Luna 分工是工作规则，不能强制切换主模型。模型与子代理不可用时有串行回退；具体账户可用性以客户端为准。
+- OCR 和生成的阅读页本地运行，但交给 Codex 或 Claude Code 核对的文本及截图仍可能经过当前模型服务处理。“本地 OCR”不代表整个归档过程完全离线。
+- Codex 首次由 Sol/Astra 核验，后续 Sol + Luna；Claude Code 始终由当前主模型编排，先询问工作模型选择。技能不切换主模型；Claude 所选工作模型不可用时询问替代选择，不能静默回退。
 
 ## 验证与开发
 
