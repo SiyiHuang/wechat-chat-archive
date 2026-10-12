@@ -1,0 +1,4 @@
+interface:
+  display_name: "微信聊天存档"
+  short_description: "保存微信聊天、引用与图片，核查增量完整性并生成本地阅读页"
+  default_prompt: "使用 $archive-wechat-chat 归档我指定的微信聊天，先检查环境，保存图片并如实标注原图状态。"

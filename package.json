@@ -1,0 +1,14 @@
+{
+  "name": "wechat-chat-archive",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Portable Codex skill for auditable WeChat UI archives on macOS",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "test": "node --test tests/*.test.mjs",
+    "doctor": "node scripts/doctor.mjs",
+    "install-skill": "node scripts/install.mjs",
+    "check-release": "node scripts/check-release.mjs"
+  }
+}

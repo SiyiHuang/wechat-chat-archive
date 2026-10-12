@@ -1,0 +1,32 @@
+{
+  "date": "2026-10-11",
+  "round": "01",
+  "window": "Synthetic Chat History — no real conversation",
+  "captureMethod": "Synthetic accessibility fixture and synthetic screenshot attribution",
+  "captureEvidence": {
+    "textSources": ["synthetic fixture"],
+    "screenshotRefs": ["synthetic screenshot reference, not actual private material"],
+    "speakerVerification": "all",
+    "endDetection": "visible_end"
+  },
+  "completeness": {
+    "status": "incomplete",
+    "recognizedItems": 3,
+    "skippedMedia": 0,
+    "evidence": ["Synthetic visible end marker", "All synthetic speakers attributed"],
+    "limitations": ["One synthetic media source is unavailable; media bytes were not fully captured"]
+  },
+  "participants": [
+    { "displayName": "Synthetic Alice", "alias": "Synthetic A", "status": "confirmed", "evidence": ["Synthetic UI fixture displays both names"] }
+  ],
+  "pages": [
+    { "messages": [
+      { "speaker": "Synthetic Alice", "timestamp": "2026-10-11 09:00", "body": "This is a synthetic discussion question." },
+      { "speaker": "Synthetic Bob", "timestamp": "2026-10-11 09:01", "body": "This is a synthetic answer.", "quote": { "speaker": "Synthetic Alice", "text": "This is a synthetic discussion question." } }
+    ] },
+    { "messages": [
+      { "speaker": "Synthetic Bob", "timestamp": "2026-10-11 09:01", "body": "This is a synthetic answer.", "quote": { "speaker": "Synthetic Alice", "text": "This is a synthetic discussion question." } },
+      { "speaker": "Synthetic Alice", "timestamp": "2026-10-11 09:02", "body": "A synthetic unavailable image is accounted for.", "media": [{ "kind": "image", "status": "unavailable", "source": "unknown", "evidence": ["Synthetic image source is unavailable"] }] }
+    ] }
+  ]
+}

@@ -1,0 +1,11 @@
+name = "wechat_transcriber"
+description = "Check a bounded captured WeChat evidence batch and return structured candidates."
+model = "gpt-6-luna"
+model_reasoning_effort = "high"
+sandbox_mode = "read-only"
+developer_instructions = """
+Read only the evidence batch and schema supplied by the orchestrator.
+Preserve historical display names, timestamps, repeated messages and quoted text.
+Return candidates, evidence references and uncertainties; do not guess authors or original-image provenance.
+Never operate the shared WeChat UI or publish archive content.
+"""
