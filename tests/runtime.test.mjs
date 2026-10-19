@@ -19,6 +19,9 @@ test("installer copies a self-contained skill into a destination containing spac
   await fs.access(path.join(destination, "scripts/doctor.mjs"));
   await fs.access(path.join(destination, "scripts/ocr.swift"));
   await fs.access(path.join(destination, "scripts/ocr.sh"));
+  await fs.access(path.join(destination, "scripts/ocr.mjs"));
+  await fs.access(path.join(destination, "scripts/ocr_documents.swift"));
+  await fs.access(path.join(destination, "scripts/ocr_legacy.sh"));
 });
 
 test("installer preserves an existing destination in a timestamped backup", async () => {
@@ -142,7 +145,7 @@ test("local Vision OCR reads generated Chinese and English text and returns conf
   const generated = spawnSync(generator, [fixture], { encoding: "utf8" });
   assert.equal(generated.status, 0, generated.stderr);
 
-  const ocr = spawnSync("bash", [path.join(root, "skills/archive-wechat-chat/scripts/ocr.sh"), fixture], { encoding: "utf8" });
+  const ocr = spawnSync("bash", [path.join(root, "skills/archive-wechat-chat/scripts/ocr.sh"), "--mode", "text", fixture], { encoding: "utf8" });
   assert.equal(ocr.status, 0, ocr.stderr);
   const result = JSON.parse(ocr.stdout);
   const line = result.images[0].lines.find((entry) => entry.text.includes("WeChat archive fixture 123"));
@@ -161,6 +164,52 @@ test("local Vision OCR reads generated Chinese and English text and returns conf
   assert.equal(result.engine.revision, Math.max(...result.engine.supportedRevisions));
   assert.deepEqual(result.engine.recognitionLanguages, ["zh-Hans", "en-US"]);
   assert.equal(result.engine.recognitionLevel, "accurate");
+
+  const fallbackBinary = path.join(temporaryRoot, "objective-c-ocr");
+  const fallbackCompile = spawnSync("clang", ["-fobjc-arc", "-framework", "Foundation", "-framework", "CoreGraphics", "-framework", "CoreML", "-framework", "ImageIO", "-framework", "Vision", path.join(root, "skills/archive-wechat-chat/scripts/ocr_fallback.m"), "-o", fallbackBinary], { encoding: "utf8" });
+  assert.equal(fallbackCompile.status, 0, fallbackCompile.stderr);
+  const fallbackRun = spawnSync(fallbackBinary, [fixture], { encoding: "utf8" });
+  assert.equal(fallbackRun.status, 0, fallbackRun.stderr);
+  const fallback = JSON.parse(fallbackRun.stdout);
+  assert.equal(fallback.engine.implementation, "objective-c");
+  assert.ok(fallback.images[0].lines.some(entry => entry.text.includes("微信归档")), fallbackRun.stdout);
+});
+
+test("native document API reads generated tables and auto mode uses actual structure", { skip: process.platform !== "darwin" }, async (context) => {
+  const macOS = spawnSync("sw_vers", ["-productVersion"], { encoding: "utf8" });
+  const sdk = spawnSync("xcrun", ["--sdk", "macosx", "--show-sdk-version"], { encoding: "utf8" });
+  if (Number(macOS.stdout.trim().split('.')[0]) < 26 || sdk.status !== 0 || Number(sdk.stdout.trim().split('.')[0]) < 26) return context.skip("Document API needs macOS and SDK 26+, old text OCR remains covered");
+  const fixture = path.join(temporaryRoot, "synthetic structured document.png");
+  const generator = path.join(temporaryRoot, "document-fixture-generator");
+  const compile = spawnSync("clang", ["-fobjc-arc", "-framework", "AppKit", "-framework", "Foundation", path.join(root, "tests/document-fixture.m"), "-o", generator], { encoding: "utf8" });
+  assert.equal(compile.status, 0, compile.stderr);
+  assert.equal(spawnSync(generator, [fixture]).status, 0);
+  const script = path.join(root, "skills/archive-wechat-chat/scripts/ocr.sh");
+  const strict = spawnSync("bash", [script, "--mode", "document", fixture], { encoding: "utf8", timeout: 90000 });
+  assert.equal(strict.status, 0, strict.stderr);
+  const result = JSON.parse(strict.stdout);
+  assert.equal(result.engine.api, "RecognizeDocumentsRequest");
+  assert.equal(result.engine.kind, "document");
+  assert.equal(result.selection.selected, "document");
+  const documents = result.images[0].documents;
+  assert.ok(documents.length > 0, strict.stdout);
+  const transcript = documents.map(document => document.transcript).join('\n');
+  assert.ok(transcript.includes('微信归档'), transcript);
+  assert.ok(transcript.includes('Alice'), transcript);
+  assert.ok(documents.some(document => document.paragraphs.length > 0), strict.stdout);
+  const tables = documents.flatMap(document => document.tables);
+  assert.ok(tables.length > 0, strict.stdout);
+  const aliceRow = tables.flatMap(table => table.rows).find(row => row.some(cell => cell.text.includes('Alice')));
+  assert.ok(aliceRow?.some(cell => cell.text.includes('42')), JSON.stringify(tables));
+  assert.ok(aliceRow.length >= 3, JSON.stringify(tables));
+  assert.ok(result.images[0].lines.every(line => line.bbox.width > 0 && line.bbox.height > 0));
+
+  const auto = spawnSync("bash", [script, fixture, fixture], { encoding: "utf8", timeout: 90000 });
+  assert.equal(auto.status, 0, auto.stderr);
+  const selected = JSON.parse(auto.stdout);
+  assert.equal(selected.selection.selected, 'document');
+  assert.deepEqual(selected.selection.fallbackReasons, []);
+  assert.equal(selected.images.length, 2);
 });
 
 test.after(async () => {

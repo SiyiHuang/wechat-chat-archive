@@ -27,8 +27,14 @@ checks.push({ name: "Swift SDK compile probe", ...commandVersion("swift", ["-e",
 checks.push({ name: "Clang", ...commandVersion("clang", ["--version"]) });
 const developerDirectory = commandVersion("xcode-select", ["-p"]);
 const sdkPath = commandVersion("xcrun", ["--sdk", "macosx", "--show-sdk-path"]);
+const sdkVersion = commandVersion("xcrun", ["--sdk", "macosx", "--show-sdk-version"]);
 checks.push({ name: "Apple developer tools", ...developerDirectory });
 checks.push({ name: "macOS SDK", ...sdkPath });
+checks.push({ name: "macOS SDK version", ...sdkVersion });
+const supportsDocumentPrerequisites = osVersion.available && Number(osVersion.detail.split('.')[0]) >= 26
+  && sdkVersion.available && Number(sdkVersion.detail.split('.')[0]) >= 26
+  && checks.find(check => check.name === "Swift SDK compile probe")?.available;
+checks.push({ name: "Structured document prerequisites", available: Boolean(supportsDocumentPrerequisites), detail: supportsDocumentPrerequisites ? "macOS 26+, SDK 26+, and basic Swift compile probe passed; verify the actual document request with a sample" : "Optional: document mode needs macOS 26+, SDK 26+, and matching Swift; auto mode retains legacy text OCR" });
 
 const candidates = [
   "/Applications/WeChat.app",
@@ -51,6 +57,7 @@ const report = {
   notes: [
     "This check does not inspect or grant macOS UI automation or Accessibility permissions.",
     "Apple Vision OCR runs locally through system frameworks; this report does not guarantee which compute device handled a request.",
+    "Document recognition is optional. Old systems and toolchains can use ocr.sh --mode text; auto mode reports the selected backend and any fallback reason.",
   ],
 };
 if (!checks.find((check) => check.name === "Swift SDK compile probe")?.available) {

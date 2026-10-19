@@ -62,10 +62,10 @@ Claude Code 使用 `/archive-wechat-chat` 加上同样的要求。两种宿主�
 
 ## 环境与能力边界
 
-- macOS、已登录的微信、Node.js 20+。OCR 需要 Apple Command Line Tools；缺少时可按提示运行 `xcode-select --install`。Swift 可用时使用 Swift，工具链不匹配时改用同套工具中的 Clang 调用 Apple Vision。不需要额外 npm 依赖。
+- macOS、已登录的微信、Node.js 20+。OCR 需要 Apple Command Line Tools；缺少时可按提示运行 `xcode-select --install`。macOS 26+ 与配套 SDK/Swift 可用时，自动优先用结构化文档识别；其他环境回退原文字 OCR，Swift 不匹配还可用 Clang/Objective-C。无需为使用 fallback 升级 OS，不需要额外 npm 依赖。
 - 当前 Codex 或 Claude Code 会话必须能操作桌面，且获得对应的辅助功能/屏幕权限。技能本身不附带桌面控制服务；没有此能力时只能整理你提供的导出和截图。
 - Apple Vision 负责本地 OCR，不调用订阅 OCR API。Apple silicon 上可列出 Vision 提供的计算设备，默认由系统调度；**不能保证 OCR 一定使用 Neural Engine**。详见 [Apple OCR](skills/archive-wechat-chat/references/apple-ocr.md)。
-- 当前 OCR 使用 `VNRecognizeTextRequest`，显式选用本机支持的最高修订版，并输出实际 API/实现/修订版；尚未接入 macOS 26 的 `RecognizeDocumentsRequest` 结构化文档接口。逐行文字识别不等于表格或段落理解，接口比较与工具链限制见上述 Apple OCR 说明。
+- OCR 默认 `auto`：新 API 可用时输出 `RecognizeDocumentsRequest` 的段落、表格行列、列表及文字行；不可用时返回原 `VNRecognizeTextRequest` 的文字结果。JSON 的 `engine` 与 `selection` 明确记录实际 API 和 fallback 原因。`ocr.sh --mode text` 可强制旧路径；`--mode document` 只接受新 API 成功，方便验收。文档结构不能替代聊天作者、引用与来源截图的核验。
 - 保存图片使用微信查看器的保存功能。**微信能导出文件不等于发送者原图已恢复**；没有明确原图下载或发送端证据时标为原图未验证。截图只作证据/预览。详见 [图片规则](skills/archive-wechat-chat/references/media-capture.md)。
 - OCR 和生成的阅读页本地运行，但交给 Codex 或 Claude Code 核对的文本及截图仍可能经过当前模型服务处理。“本地 OCR”不代表整个归档过程完全离线。
 - Codex 首次由 Sol/Astra 核验，后续 Sol + Luna；Claude Code 始终由当前主模型编排，先询问工作模型选择。技能不切换主模型；Claude 所选工作模型不可用时询问替代选择，不能静默回退。
