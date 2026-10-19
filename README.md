@@ -52,6 +52,8 @@ Claude Code 使用 `/archive-wechat-chat` 加上同样的要求。两种宿主�
 
 之后可说：“继续更新同一个档案，只加入新消息。”技能会先检查上次边界，不全局删除同文消息。新手不必手工写 JSON、运行验证或管理子代理。
 
+主聊天后续默认仅抓少量已归档尾部重叠及新消息，确认无新增时直接报告，不反复重扫全部历史。固定合并转发包仍按独立范围处理。表情包可用文字占位；处理困难时允许明确略过并记录数量及完整性限制，普通图片仍默认保留最高可用文件。
+
 直接打开目标即可：主聊天就从主窗口读取；合并转发就读取已经打开的独立记录窗口，不必先进入历史搜索。Codex 会结合画面和进入路径识别模式。通过关键词/日期筛出的聊天记录属于第三类有限结果，不能当作整段原会话。不同聊天、不同转发包有独立范围身份，不能仅凭相同群名或相同正文混合去重。
 
 分页时保留半页左右的重叠，并分别核查两端边界。向上抓取会恢复原消息顺序；同文但不同作者、时间或出现位置的消息保留。遇到作者被裁切、加载未结束或重叠不唯一时，先补看来源证据，不能以猜测换取“已完整”。具体区别见 [窗口模式](skills/archive-wechat-chat/references/window-modes.md)。
@@ -63,6 +65,7 @@ Claude Code 使用 `/archive-wechat-chat` 加上同样的要求。两种宿主�
 - macOS、已登录的微信、Node.js 20+。OCR 需要 Apple Command Line Tools；缺少时可按提示运行 `xcode-select --install`。Swift 可用时使用 Swift，工具链不匹配时改用同套工具中的 Clang 调用 Apple Vision。不需要额外 npm 依赖。
 - 当前 Codex 或 Claude Code 会话必须能操作桌面，且获得对应的辅助功能/屏幕权限。技能本身不附带桌面控制服务；没有此能力时只能整理你提供的导出和截图。
 - Apple Vision 负责本地 OCR，不调用订阅 OCR API。Apple silicon 上可列出 Vision 提供的计算设备，默认由系统调度；**不能保证 OCR 一定使用 Neural Engine**。详见 [Apple OCR](skills/archive-wechat-chat/references/apple-ocr.md)。
+- 当前 OCR 使用 `VNRecognizeTextRequest`，显式选用本机支持的最高修订版，并输出实际 API/实现/修订版；尚未接入 macOS 26 的 `RecognizeDocumentsRequest` 结构化文档接口。逐行文字识别不等于表格或段落理解，接口比较与工具链限制见上述 Apple OCR 说明。
 - 保存图片使用微信查看器的保存功能。**微信能导出文件不等于发送者原图已恢复**；没有明确原图下载或发送端证据时标为原图未验证。截图只作证据/预览。详见 [图片规则](skills/archive-wechat-chat/references/media-capture.md)。
 - OCR 和生成的阅读页本地运行，但交给 Codex 或 Claude Code 核对的文本及截图仍可能经过当前模型服务处理。“本地 OCR”不代表整个归档过程完全离线。
 - Codex 首次由 Sol/Astra 核验，后续 Sol + Luna；Claude Code 始终由当前主模型编排，先询问工作模型选择。技能不切换主模型；Claude 所选工作模型不可用时询问替代选择，不能静默回退。

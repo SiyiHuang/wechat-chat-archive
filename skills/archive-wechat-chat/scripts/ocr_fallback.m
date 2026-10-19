@@ -11,6 +11,16 @@ static NSString *DeviceName(id<MLComputeDeviceProtocol> device) {
     return @"unknown";
 }
 
+static VNRecognizeTextRequest *TextRequest(void) {
+    VNRecognizeTextRequest *request = [[VNRecognizeTextRequest alloc] init];
+    NSUInteger latest = VNRecognizeTextRequest.supportedRevisions.lastIndex;
+    if (latest != NSNotFound) request.revision = latest;
+    request.recognitionLevel = VNRequestTextRecognitionLevelAccurate;
+    request.recognitionLanguages = @[@"zh-Hans", @"en-US"];
+    request.usesLanguageCorrection = YES;
+    return request;
+}
+
 static NSDictionary *ReadImage(NSString *path, NSError **error) {
     NSURL *url = [NSURL fileURLWithPath:path];
     CGImageSourceRef source = CGImageSourceCreateWithURL((__bridge CFURLRef)url, NULL);
@@ -25,10 +35,7 @@ static NSDictionary *ReadImage(NSString *path, NSError **error) {
         return nil;
     }
 
-    VNRecognizeTextRequest *request = [[VNRecognizeTextRequest alloc] init];
-    request.recognitionLevel = VNRequestTextRecognitionLevelAccurate;
-    request.recognitionLanguages = @[@"zh-Hans", @"en-US"];
-    request.usesLanguageCorrection = YES;
+    VNRecognizeTextRequest *request = TextRequest();
     VNImageRequestHandler *handler = [[VNImageRequestHandler alloc] initWithCGImage:image options:@{}];
     BOOL succeeded = [handler performRequests:@[request] error:error];
     size_t width = CGImageGetWidth(image);
@@ -71,11 +78,8 @@ int main(int argc, const char *argv[]) {
 
         NSMutableDictionary *stages = [NSMutableDictionary dictionary];
         id neuralEngineAvailable = [NSNull null];
+        VNRecognizeTextRequest *probe = TextRequest();
         if (@available(macOS 14.0, *)) {
-            VNRecognizeTextRequest *probe = [[VNRecognizeTextRequest alloc] init];
-            probe.recognitionLevel = VNRequestTextRecognitionLevelAccurate;
-            probe.recognitionLanguages = @[@"zh-Hans", @"en-US"];
-            probe.usesLanguageCorrection = YES;
             NSError *error = nil;
             NSDictionary<NSString *, NSArray<id<MLComputeDeviceProtocol>> *> *supported = [probe supportedComputeStageDevicesAndReturnError:&error];
             if (supported) {
@@ -93,8 +97,21 @@ int main(int argc, const char *argv[]) {
                 neuralEngineAvailable = @(hasNeuralEngine);
             }
         }
+        NSMutableArray *revisions = [NSMutableArray array];
+        [VNRecognizeTextRequest.supportedRevisions enumerateIndexesUsingBlock:^(NSUInteger revision, BOOL *stop) {
+            [revisions addObject:@(revision)];
+        }];
         NSDictionary *result = @{
             @"images": images,
+            @"engine": @{
+                @"api": @"VNRecognizeTextRequest",
+                @"implementation": @"objective-c",
+                @"kind": @"text",
+                @"revision": @(probe.revision),
+                @"supportedRevisions": revisions,
+                @"recognitionLanguages": probe.recognitionLanguages,
+                @"recognitionLevel": @"accurate"
+            },
             @"compute": @{
                 @"selection": @"automatic",
                 @"supportedDevicesByStage": stages,

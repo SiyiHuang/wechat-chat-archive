@@ -25,6 +25,16 @@ struct OCRImage: Encodable {
 }
 
 struct OCRResult: Encodable {
+    struct Engine: Encodable {
+        let api: String
+        let implementation: String
+        let kind: String
+        let revision: Int
+        let supportedRevisions: [Int]
+        let recognitionLanguages: [String]
+        let recognitionLevel: String
+    }
+
     struct Compute: Encodable {
         let selection: String
         let supportedDevicesByStage: [String: [String]]
@@ -33,6 +43,18 @@ struct OCRResult: Encodable {
 
     let images: [OCRImage]
     let compute: Compute
+    let engine: Engine
+}
+
+func textRequest() -> VNRecognizeTextRequest {
+    let request = VNRecognizeTextRequest()
+    if let latest = VNRecognizeTextRequest.supportedRevisions.last {
+        request.revision = latest
+    }
+    request.recognitionLevel = .accurate
+    request.recognitionLanguages = ["zh-Hans", "en-US"]
+    request.usesLanguageCorrection = true
+    return request
 }
 
 func deviceName(_ device: MLComputeDevice) -> String {
@@ -55,10 +77,7 @@ func readImage(_ path: String) throws -> OCRImage {
         throw NSError(domain: "LocalOCR", code: 1, userInfo: [NSLocalizedDescriptionKey: "Cannot decode image: \(path)"])
     }
 
-    let request = VNRecognizeTextRequest()
-    request.recognitionLevel = .accurate
-    request.recognitionLanguages = ["zh-Hans", "en-US"]
-    request.usesLanguageCorrection = true
+    let request = textRequest()
 
     let handler = VNImageRequestHandler(cgImage: image)
     try handler.perform([request])
@@ -83,13 +102,10 @@ do {
         exit(2)
     }
 
-    let request = VNRecognizeTextRequest()
+    let request = textRequest()
     var devicesByStage: [String: [String]] = [:]
     var neuralEngineAvailable: Bool?
     if #available(macOS 14.0, *) {
-        request.recognitionLevel = .accurate
-        request.recognitionLanguages = ["zh-Hans", "en-US"]
-        request.usesLanguageCorrection = true
         let supported = try request.supportedComputeStageDevices
         devicesByStage = Dictionary(uniqueKeysWithValues: supported.map { stage, devices in
             (String(describing: stage), devices.map(deviceName).sorted())
@@ -106,6 +122,15 @@ do {
             selection: "automatic",
             supportedDevicesByStage: devicesByStage,
             neuralEngineSupportedByAnyStage: neuralEngineAvailable
+        ),
+        engine: .init(
+            api: "VNRecognizeTextRequest",
+            implementation: "swift",
+            kind: "text",
+            revision: request.revision,
+            supportedRevisions: Array(VNRecognizeTextRequest.supportedRevisions),
+            recognitionLanguages: request.recognitionLanguages,
+            recognitionLevel: "accurate"
         )
     )
     let encoder = JSONEncoder()

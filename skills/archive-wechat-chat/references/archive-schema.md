@@ -47,12 +47,18 @@ When an overlap supplies additional per-message evidence, the CLI unions its evi
 
 - `status`: `complete` or `incomplete`.
 - `recognizedItems`: nonnegative integer; retained messages + previous-round overlap + explicitly skipped media.
-- `skippedMedia`: nonnegative integer, normally zero. Every attached media item is retained by default. A media-only message is one recognized record regardless of attachment count.
+- `skippedMedia`: nonnegative integer, normally zero. In the reconciliation equation this counts wholly omitted media-only message records, not files left undownloaded for retained messages. Ordinary media records are retained by default; difficult stickers may be explicitly omitted under the skill's sticker policy. A media-only message is one recognized record regardless of attachment count.
 - `skippedMediaEvidence`: required nonempty string array if media was explicitly excluded.
 - `evidence`: string array describing capture coverage.
 - `limitations`: string array describing omissions or uncertainty.
 
 `complete` requires nonempty coverage evidence, no known coverage limitations, both text-source and screenshot-attribution references, every retained speaker verified, both scope boundaries proved, and reconciled item counts. Faithful contextual or undisplayed time representation can accompany complete content coverage: it does not claim precise individual timestamps. A round containing preview or unavailable media must be `incomplete` with a media limitation. `saved_unverified` can satisfy exported-file coverage but does not imply original fidelity. Incomplete source captures must state a limitation. Content coverage, time precision, quote resolution and media fidelity are reported separately.
+
+### Completeness and sticker policy
+
+The skill permits text placeholders or omission of difficult stickers without requiring dynamic-file extraction. A retained placeholder is one normal message, not a skipped record. Preserve its author/time evidence and distinguish source-visible text from the archive's placeholder. With actual screenshot evidence, retain a `kind:"sticker", status:"preview", source:"screenshot"` media record; no local `path` is required. Keep `skippedMedia:0` for that retained message. Report the missing dynamic bytes as a media limitation, with `status:"incomplete"` under the existing validator.
+
+If the entire sticker-only message is omitted, increment `skippedMedia` once for that message, keep its source occurrence evidence, and explain the sticker policy and omission in `skippedMediaEvidence` and `limitations`. Include it in `recognizedItems`; mark the round `incomplete` so the allowed omission is visible. Do not increment `skippedMedia` merely because a retained message's attachment was not downloaded, and do not use `unavailable` to mean intentionally skipped. Do not rewrite previous rounds or their overlap identities to adopt a new placeholder policy.
 
 ## Messages and ordered identity
 
@@ -90,7 +96,7 @@ Cross-round links use `YYYY-MM-DD-微信聊天记录.md#ID`; inferred links appe
 
 ## Media records
 
-Every attached image/sticker has a record. `media` is an array with `kind` (normally `image` or `sticker`; `file` preserves opaque/unsupported originals such as HEIC), `status`, `source`, `evidence:[string]`, and optional `captureId`, `path`, `alt`, `sha256`, `width`, `height`, `mime`, `originalDownloadEvidence`.
+Every retained image/sticker attachment has a record; wholly omitted sticker-only messages are accounted for separately under the sticker policy above. `media` is an array with `kind` (normally `image` or `sticker`; `file` preserves opaque/unsupported originals such as HEIC), `status`, `source`, `evidence:[string]`, and optional `captureId`, `path`, `alt`, `sha256`, `width`, `height`, `mime`, `originalDownloadEvidence`.
 
 | Status | Meaning | Required evidence |
 |---|---|---|

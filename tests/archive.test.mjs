@@ -87,6 +87,32 @@ test('explicit incomplete status and counts are enforced', async t => {
   await assert.rejects(importCapture(other, wrong), /every speaker verified/);
 });
 
+test('retained sticker placeholders preserve the message without counting it as skipped', async t => {
+  const root = await temp(t); await initArchive(root);
+  const sticker = { ...msg('[表情包：合成占位]'), media: [{ kind: 'sticker', status: 'preview', source: 'screenshot', evidence: ['Synthetic screenshot shows a sticker, no dynamic bytes retained'] }] };
+  const input = capture([sticker], { completeness: { status: 'incomplete', recognizedItems: 1, skippedMedia: 0, evidence: ['Synthetic sticker occurrence'], limitations: ['Dynamic sticker file was not extracted; placeholder is archive text'] } });
+  await assert.rejects(importCapture(root, input), /--allow-incomplete/);
+  const result = await importCapture(root, input, { allowIncomplete: true });
+  assert.equal(result.messages, 1);
+  const round = (await readArchive(root)).rounds[0];
+  assert.equal(round.completeness.skippedMedia, 0);
+  assert.equal(round.messages[0].media[0].status, 'preview');
+  assert.equal(round.messages[0].body, '[表情包：合成占位]');
+});
+
+test('omitted sticker-only records reconcile counts and require exclusion evidence', async t => {
+  const root = await temp(t); await initArchive(root);
+  const input = capture([msg('Retained text')], { completeness: { status: 'incomplete', recognizedItems: 2, skippedMedia: 1, evidence: ['Synthetic two source occurrences'], limitations: ['One difficult sticker-only record omitted under sticker policy'] } });
+  await assert.rejects(importCapture(root, input, { allowIncomplete: true }), /exclusion evidence/);
+  input.completeness.skippedMediaEvidence = ['Synthetic screenshot occurrence 2 is the explicitly omitted sticker-only message'];
+  const result = await importCapture(root, input, { allowIncomplete: true });
+  assert.equal(result.messages, 1);
+  const round = (await readArchive(root)).rounds[0];
+  assert.equal(round.completeness.recognizedItems, 2);
+  assert.equal(round.completeness.skippedMedia, 1);
+  assert.equal(round.completeness.status, 'incomplete');
+});
+
 test('reply statuses preserve quotes and ambiguous auto matches fail', async t => {
   const root = await temp(t); await initArchive(root);
   const input = capture([msg('Repeated'), msg('Repeated'), { ...msg('Response'), quote: { text: 'Repeated' } }]);

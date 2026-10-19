@@ -154,6 +154,13 @@ test("local Vision OCR reads generated Chinese and English text and returns conf
   assert.ok(line.confidence >= 0 && line.confidence <= 1);
   assert.ok(line.bbox.width > 0 && line.bbox.height > 0);
   assert.equal(result.compute.selection, "automatic");
+  assert.equal(result.engine.api, "VNRecognizeTextRequest");
+  assert.equal(result.engine.kind, "text");
+  assert.ok(["swift", "objective-c"].includes(result.engine.implementation));
+  assert.ok(result.engine.supportedRevisions.length > 0);
+  assert.equal(result.engine.revision, Math.max(...result.engine.supportedRevisions));
+  assert.deepEqual(result.engine.recognitionLanguages, ["zh-Hans", "en-US"]);
+  assert.equal(result.engine.recognitionLevel, "accurate");
 });
 
 test.after(async () => {
